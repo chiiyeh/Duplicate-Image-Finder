@@ -1,0 +1,21 @@
+version: "3.7"
+services:
+  dev:
+    build:
+      context: .
+      args:
+        user: "$USER"
+    image: python_dev
+    container_name: python_dev
+    network_mode: "host"
+    volumes:
+    - type: bind
+      source: ./
+      target: /home/${USER}/dev
+    command: "tail -f /dev/null"
+    # for running with gpu
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #       - capabilities: [gpu]
