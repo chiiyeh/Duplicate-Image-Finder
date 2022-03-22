@@ -1,20 +1,20 @@
+import argparse
+import math
 from pathlib import Path
-from typing import Optional, List
+import pathlib
+from typing import Optional, List, Dict, Tuple
 from PIL import Image
 import matplotlib.pyplot as plt
 import numpy as np
-import os
+import sys
 import time
-import collections
 
 
-def dup_image_search(directory_A: Path, directory_B: Optional[Path] = None, similarity: str = "normal", px_size: int = 50, show_output: bool = False, delete: bool = False, move: bool = False):
+def dup_image_search(directory_A: Path, directory_B: Optional[Path] = None, threshold: float = 5, px_size: int = 50, show_output: bool = False, delete: bool = False, move: bool = False):
     """
     directory_A (Path)......folder path to search for duplicate/similar images
     directory_B (Path)....second folder path to search for duplicate/similar images that exist in directory_A
-    similarity (str)....."normal" = searches for duplicates, recommended setting, MSE < 200
-                            "high" = serached for exact duplicates, extremly sensitive to details, MSE < 0.1
-                            "low" = searches for similar images, MSE < 1000
+    threshold (float).....average pixel absolute difference
     px_size (int)........recommended not to change default value
                             resize images to px_size height x width (in pixels) before being compared
                             the higher the pixel size, the more computational ressources and time required
@@ -37,18 +37,14 @@ def dup_image_search(directory_A: Path, directory_B: Optional[Path] = None, simi
     if not directory_A.is_dir():
         raise FileNotFoundError(f"Directory: {directory_A} does not exist")
 
-    result, lower_quality = search_dir(directory_A, directory_B, similarity, px_size, show_output, delete)
+    result, lower_quality = search_dir(directory_A, directory_B, threshold, px_size, show_output, delete)
     if len(lower_quality) != len(set(lower_quality)):
         print("DifPy found that there are duplicates within directory A.")
 
 
     time_elapsed = np.round(time.time()-start_time, 4)
 
-    if len(result) == 1:
-        images = "image"
-    else:
-        images = "images"
-    print("Found", len(result), images, "with one or more duplicate/similar images in", time_elapsed, "seconds.")
+    print(f"Found {len(result)} images with one or more duplicate/similar images in {time_elapsed} seconds.")
 
     if len(result) != 0:
         if delete:
@@ -72,11 +68,11 @@ def dup_image_search(directory_A: Path, directory_B: Optional[Path] = None, simi
     return result
 
 
-def search_dir(directory_A, directory_B, similarity="normal", px_size=50, show_output=False, delete=False) -> tuple[dict[Path, List[Path]], List[Path]]:
+def search_dir(directory_A, directory_B, threshold=5, px_size=50, show_output=False, delete=False) -> Tuple[Dict[Path, List[Path]], List[Path]]:
     """
     test
     """
-    thres = 15
+    memsize = 8000
     matrix_A, filenames_A = create_imgs_matrix(directory_A, px_size, getrotate=True)
     matrix_B = {}
     if directory_B == directory_A:
@@ -89,16 +85,34 @@ def search_dir(directory_A, directory_B, similarity="normal", px_size=50, show_o
 
     # find duplicates/similar images within one folder
     dirA_ind_sim = dict()
+    loop_size = math.floor(memsize/(sys.getsizeof(matrix_A["normal"])*50/1000000)) * 50 
+    if not loop_size:
+        loop_size = 1
+    print(f"Maximum loop size: {loop_size}")
+    num_images_B = matrix_B["normal"].shape[0]
+    num_loop = math.ceil(num_images_B/loop_size) ## CHECK
+    print(f"Number of loops: {num_loop}")
     for _, matrix in matrix_A.items():
-        dif = np.expand_dims(matrix, axis=1) - matrix_B["normal"]
-        dif = abs(dif).sum(2)
-        dif = dif / (3*px_size*px_size)
-        for i in np.transpose((dif<thres).nonzero()):
-            if i[0] != i[1] or directory_A != directory_B:
-                dirA_ind_sim.setdefault(i[0], []).append(i[1])
+        for i in range(num_loop):
+            if directory_A != directory_B:
+                dif = np.expand_dims(matrix, axis=1) - matrix_B["normal"][i*loop_size:min((i+1)*loop_size, num_images_B)]
+            else:
+                dif = np.expand_dims(matrix[i*loop_size:], axis=1) - matrix_B["normal"][i*loop_size:min((i+1)*loop_size, num_images_B)]
+            dif = abs(dif).sum(2)
+            dif = dif / (3*px_size*px_size)
+            for ind in np.transpose((dif<threshold).nonzero()):
+                if directory_A != directory_B:
+                    a_ind = ind[0]
+                    b_ind = ind[1]+i*loop_size
+                elif ind[0] != ind[1]:
+                    a_ind = ind[0]+i*loop_size
+                    b_ind = ind[1]+i*loop_size
+                else:
+                    continue
+                dirA_ind_sim.setdefault(a_ind, []).append(b_ind)
                 if show_output:
-                    show_img_figs(matrix[i[0]], matrix_B["normal"][i[1]], px_size, dif[(i[0], i[1])])
-                    print(f"Duplicate files:\n{filenames_A[i[0]]} and \n{filenames_B[i[1]]}")
+                    show_img_figs(matrix[a_ind], matrix_B["normal"][b_ind], px_size, dif[(ind[0], ind[1])])
+                    print(f"Duplicate files:\n{filenames_A[a_ind]} and \n{filenames_B[b_ind]}")
 
     if directory_A == directory_B:
         processed_ls = []
@@ -119,7 +133,7 @@ def search_dir(directory_A, directory_B, similarity="normal", px_size=50, show_o
     return result, lower_quality
 
 
-def create_imgs_matrix(directory: Path, px_size: int, getrotate: bool = False) -> tuple[dict[str, np.ndarray], List[Path]]:
+def create_imgs_matrix(directory: Path, px_size: int, getrotate: bool = False) -> Tuple[Dict[str, np.ndarray], List[Path]]:
     """
     Read images in directory, downsize to pxsize and store in matrix.
     If getrotate will generate the different rotations 90, 180, 270 degrees.
@@ -127,6 +141,8 @@ def create_imgs_matrix(directory: Path, px_size: int, getrotate: bool = False) -
     img_filenames = []
     # create list of all files in directory
     folder_files = [filename for filename in directory.rglob('*') if filename.is_file()]
+    num_files = len(folder_files)
+    print(f"Processing {num_files} images!")
 
     # create images matrix
     img_matrix_rotdict = {
@@ -135,12 +151,14 @@ def create_imgs_matrix(directory: Path, px_size: int, getrotate: bool = False) -
         "180": [],
         "270": []
     }
+    count = 0
     for filename in folder_files:
         # check if the file is an image
         try:
             with Image.open(filename) as im:
                 im = im.resize((px_size, px_size))
-                im = im.convert("RGB")
+                if im.mode != "RGB":
+                    im = im.convert("RGB")
                 img_matrix_rotdict["normal"].append(np.asarray(im).flatten())
                 img_filenames.append(filename)
                 if getrotate:
@@ -149,12 +167,15 @@ def create_imgs_matrix(directory: Path, px_size: int, getrotate: bool = False) -
                     img_matrix_rotdict["270"].append(np.asarray(im.transpose(Image.ROTATE_270)).flatten())
         except OSError:
             pass
+        count += 1
+        if count % 100 == 0:
+            print(f"Processed {count} images out of {num_files}!")
     matrix = dict()
-    matrix["normal"] = np.asarray(img_matrix_rotdict["normal"], dtype=float)
+    matrix["normal"] = np.asarray(img_matrix_rotdict["normal"], dtype=np.int32)
     if getrotate:
-        matrix["90"] = np.asarray(img_matrix_rotdict["90"], dtype=float)
-        matrix["180"] = np.asarray(img_matrix_rotdict["180"], dtype=float)
-        matrix["270"] = np.asarray(img_matrix_rotdict["270"], dtype=float)
+        matrix["90"] = np.asarray(img_matrix_rotdict["90"], dtype=np.int32)
+        matrix["180"] = np.asarray(img_matrix_rotdict["180"], dtype=np.int32)
+        matrix["270"] = np.asarray(img_matrix_rotdict["270"], dtype=np.int32)
     return matrix, img_filenames
 
 # Function that plots two compared image files and their mse
@@ -198,3 +219,17 @@ def delete_imgs(lower_quality_set: List[Path]):
         except:
             print("Could not delete file:", file)
         print("\n***\nDeleted", deleted, "duplicates/similar images.")
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("dir_a", action="store", type=pathlib.Path, help="Main directory")
+    parser.add_argument("--dir-b", action="store", dest="dir_b", type=pathlib.Path, default=None,help="directory to search for images that exist in dir-a")
+    parser.add_argument("--px-size", dest="px_size", action="store", type=int, default=50, help="pixel size to reduce the image before comparison")
+    parser.add_argument("--threshold", action="store", type=float, default=5, help="threshold for average absolute pixel difference to consider similar")
+    parser.add_argument("--show-output", action="store_true", dest="show_output", default=False, help="Show output")
+    parser.add_argument("--delete", action="store_true", default=False, help="Delete the duplicate files of lower memory space")
+    parser.add_argument("--move", action="store_true", default=False, help="Move the duplicates as well as the high res image to dir_a/tmp folder")
+    args = parser.parse_args()
+    dup_image_search(args.dir_a, directory_B=args.dir_b, threshold=args.threshold, px_size=args.px_size, show_output=args.show_output, delete=args.delete, move=args.move)
